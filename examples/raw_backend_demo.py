@@ -1,7 +1,7 @@
 """不借助 LLM,直接驱动 OpenSandboxBackend,验证 deepagents <-> OpenSandbox 全链路。
 
-下面每个方法都是 deepagents 的 ``BackendProtocol`` 操作,由 ``BaseSandbox`` 基于三个
-原语(execute/upload_files/download_files)派生。
+下面每个方法都是 deepagents 的 ``BackendProtocol`` 操作:ls/edit/glob/grep 由
+``BaseSandbox`` 基于 execute/upload_files/download_files 派生,read 为原生覆盖。
 
 前置条件:一个在运行的 OpenSandbox 服务端(本地:``uvx opensandbox-server``);
 环境变量 OPEN_SANDBOX_DOMAIN(默认 localhost:8080)、OPEN_SANDBOX_API_KEY。

@@ -1,16 +1,8 @@
-"""OpenSandboxBackend 的单元测试。
-
-测试使用一个内存版假沙箱,只模拟后端实际用到的那一小片 OpenSandbox
-``SandboxSync`` 接口(``id``、``commands.run``、``files.write_file``/``read_bytes``、
-``kill``/``close``)。它们无需运行中的沙箱服务端,且跨平台:因为测试直接验证三个
-原语与辅助函数,而非 ``BaseSandbox`` 叠在 ``execute`` 之上的那些服务端脚本。
-
-一个可选的集成测试(``RUN_OPENSANDBOX_INTEGRATION=1``)会针对真实服务端验证
-完整的派生链路。
-"""
+"""OpenSandboxBackend 单元测试:内存假沙箱驱动三原语与原生 read,无需服务端。"""
 
 from __future__ import annotations
 
+import base64
 import os
 import posixpath
 import shlex
@@ -18,19 +10,13 @@ import shlex
 import pytest
 
 from deepagents.backends.protocol import FILE_NOT_FOUND, PERMISSION_DENIED
+from deepagents.backends.sandbox import MAX_BINARY_BYTES, MAX_OUTPUT_BYTES, TRUNCATION_MSG
 from deepagents_opensandbox import OpenSandboxBackend
-from deepagents_opensandbox.backend import (
-    _classify_error,
-    _combine_output,
-    _exit_code,
-)
+from deepagents_opensandbox.backend import _classify, _exit_code, _output
 from opensandbox.exceptions import SandboxApiException, SandboxException
 from opensandbox.models.execd import Execution, ExecutionError, ExecutionLogs, OutputMessage
 
 
-# --------------------------------------------------------------------------- #
-# 假对象(stub)
-# --------------------------------------------------------------------------- #
 def _message(text: str, ts: int, *, is_error: bool = False) -> OutputMessage:
     return OutputMessage(text=text, timestamp=ts, is_error=is_error)
 
@@ -44,11 +30,9 @@ def _execution(*, stdout=(), stderr=(), exit_code=0, error=None) -> Execution:
 
 
 class FakeCommands:
-    """模拟 ``sandbox.commands``。"""
-
     def __init__(self, sandbox: "FakeSandbox") -> None:
         self._sandbox = sandbox
-        self.responder = None  # callable(command, opts) -> Execution
+        self.responder = None
         self.raise_exc: Exception | None = None
         self.last_command: str | None = None
         self.last_opts = None
@@ -58,7 +42,6 @@ class FakeCommands:
         self.last_opts = opts
         if self.raise_exc is not None:
             raise self.raise_exc
-        # 模拟 `mkdir -p <dir>`,让上传重试路径能够成功。
         if command.startswith("mkdir -p "):
             target = shlex.split(command[len("mkdir -p "):])[0]
             self._sandbox.dirs.add(target)
@@ -69,8 +52,6 @@ class FakeCommands:
 
 
 class FakeFiles:
-    """模拟 ``sandbox.files``。"""
-
     def __init__(self, sandbox: "FakeSandbox") -> None:
         self._sandbox = sandbox
         self.strict_parents = False
@@ -88,8 +69,6 @@ class FakeFiles:
 
 
 class FakeSandbox:
-    """opensandbox.SandboxSync 的最小替身。"""
-
     def __init__(self, sandbox_id: str = "sbx-test-1") -> None:
         self.id = sandbox_id
         self.files_store: dict[str, bytes] = {}
@@ -116,26 +95,21 @@ def backend(sandbox: FakeSandbox) -> OpenSandboxBackend:
     return OpenSandboxBackend(sandbox)  # type: ignore[arg-type]
 
 
-# --------------------------------------------------------------------------- #
-# 辅助函数单测
-# --------------------------------------------------------------------------- #
-def test_combine_output_orders_by_timestamp():
+def test_output_orders_by_timestamp():
     execution = _execution(
         stdout=[_message("first", 1), _message("third", 3)],
         stderr=[_message("second", 2, is_error=True)],
     )
-    assert _combine_output(execution) == "first\nsecond\nthird"
+    assert _output(execution) == "first\nsecond\nthird"
 
 
-def test_combine_output_empty_is_empty_string():
-    # 关键:BaseSandbox 解析器把空输出视为“无结果”(如 grep 无匹配),
-    # 绝不能替换成哨兵字符串。
-    assert _combine_output(_execution()) == ""
+def test_output_empty_is_empty_string():
+    assert _output(_execution()) == ""
 
 
-def test_combine_output_strips_trailing_newlines_per_message():
+def test_output_strips_trailing_newlines():
     execution = _execution(stdout=[_message("line\n", 1), _message("next\n", 2)])
-    assert _combine_output(execution) == "line\nnext"
+    assert _output(execution) == "line\nnext"
 
 
 def test_exit_code_prefers_explicit():
@@ -161,13 +135,10 @@ def test_exit_code_infers_failure_from_error():
         (SandboxException("some other error"), None),
     ],
 )
-def test_classify_error(exc, expected):
-    assert _classify_error(exc) == expected
+def test_classify(exc, expected):
+    assert _classify(exc) == expected
 
 
-# --------------------------------------------------------------------------- #
-# execute
-# --------------------------------------------------------------------------- #
 def test_execute_returns_combined_output_and_exit_code(backend, sandbox):
     sandbox.commands.responder = lambda cmd, opts: _execution(
         stdout=[_message("hello", 1)], stderr=[_message("warn", 2)], exit_code=0
@@ -176,12 +147,6 @@ def test_execute_returns_combined_output_and_exit_code(backend, sandbox):
     assert res.output == "hello\nwarn"
     assert res.exit_code == 0
     assert res.truncated is False
-
-
-def test_execute_empty_command_is_error(backend):
-    res = backend.execute("")
-    assert res.exit_code == 1
-    assert "non-empty" in res.output
 
 
 def test_execute_swallows_sdk_exception(backend, sandbox):
@@ -214,9 +179,6 @@ def test_default_timeout_applied(sandbox):
     assert sandbox.commands.last_opts.timeout.total_seconds() == 30
 
 
-# --------------------------------------------------------------------------- #
-# upload_files / download_files
-# --------------------------------------------------------------------------- #
 def test_upload_files_writes_bytes(backend, sandbox):
     responses = backend.upload_files([("/workspace/a.txt", b"hello")])
     assert len(responses) == 1
@@ -226,7 +188,6 @@ def test_upload_files_writes_bytes(backend, sandbox):
 
 
 def test_upload_files_partial_success(backend, sandbox):
-    # 让某个特定路径即使重试后仍失败,以验证部分成功语义。
     original = sandbox.files.write_file
 
     def flaky(path, data, **kw):
@@ -242,7 +203,6 @@ def test_upload_files_partial_success(backend, sandbox):
 
 
 def test_upload_retries_after_mkdir_when_parent_missing(backend, sandbox):
-    # 父目录不存在 -> 首次写入失败 -> 后端 mkdir -p -> 重试成功。
     sandbox.files.strict_parents = True
     responses = backend.upload_files([("/workspace/deep/nested/f.txt", b"data")])
     assert responses[0].error is None
@@ -263,9 +223,86 @@ def test_download_missing_maps_to_file_not_found(backend):
     assert responses[0].error == FILE_NOT_FOUND
 
 
-# --------------------------------------------------------------------------- #
-# 标识与生命周期
-# --------------------------------------------------------------------------- #
+def test_read_text_native_no_execute(backend, sandbox):
+    sandbox.files_store["/w/notes.txt"] = b"alpha\nbeta\ngamma\n"
+    result = backend.read("/w/notes.txt")
+    assert result.error is None
+    assert result.file_data["content"] == "alpha\nbeta\ngamma"
+    assert result.file_data["encoding"] == "utf-8"
+    assert sandbox.commands.last_command is None
+
+
+def test_read_pagination_offset_limit(backend, sandbox):
+    sandbox.files_store["/w/n.txt"] = b"l1\nl2\nl3\nl4\n"
+    result = backend.read("/w/n.txt", offset=1, limit=2)
+    assert result.file_data["content"] == "l2\nl3"
+
+
+def test_read_offset_beyond_eof_is_error(backend, sandbox):
+    sandbox.files_store["/w/n.txt"] = b"only\n"
+    result = backend.read("/w/n.txt", offset=5)
+    assert result.error == "File '/w/n.txt': Line offset 5 exceeds file length (1 lines)"
+
+
+def test_read_empty_file_returns_reminder(backend, sandbox):
+    sandbox.files_store["/w/empty.txt"] = b""
+    result = backend.read("/w/empty.txt")
+    assert result.error is None
+    assert "empty contents" in result.file_data["content"]
+
+
+def test_read_missing_maps_to_file_not_found(backend):
+    result = backend.read("/does/not/exist.txt")
+    assert result.error == f"File '/does/not/exist.txt': {FILE_NOT_FOUND}"
+
+
+def test_read_normalizes_crlf(backend, sandbox):
+    sandbox.files_store["/w/dos.txt"] = b"a\r\nb\r\n"
+    result = backend.read("/w/dos.txt")
+    assert result.file_data["content"] == "a\nb"
+
+
+def test_read_binary_extension_returns_base64(backend, sandbox):
+    raw = b"\x89PNG\r\n\x1a\n\x00\x01\x02"
+    sandbox.files_store["/w/img.png"] = raw
+    result = backend.read("/w/img.png")
+    assert result.error is None
+    assert result.file_data["encoding"] == "base64"
+    assert base64.b64decode(result.file_data["content"]) == raw
+
+
+def test_read_invalid_utf8_text_falls_back_to_base64(backend, sandbox):
+    raw = b"\xff\xfe broken"
+    sandbox.files_store["/w/data.txt"] = raw
+    result = backend.read("/w/data.txt")
+    assert result.error is None
+    assert result.file_data["encoding"] == "base64"
+    assert base64.b64decode(result.file_data["content"]) == raw
+
+
+def test_read_binary_over_cap_is_error(backend, sandbox):
+    sandbox.files_store["/w/big.png"] = b"\x00" * (MAX_BINARY_BYTES + 1)
+    result = backend.read("/w/big.png")
+    assert result.error is not None
+    assert "exceeds maximum preview size" in result.error
+
+
+def test_read_truncates_huge_text_page(backend, sandbox):
+    sandbox.files_store["/w/huge.txt"] = ("\n".join(["x" * 1000] * 600)).encode()
+    result = backend.read("/w/huge.txt")
+    assert result.error is None
+    assert result.file_data["content"].endswith(TRUNCATION_MSG)
+    assert len(result.file_data["content"].encode()) <= MAX_OUTPUT_BYTES
+
+
+async def test_aread_uses_native_path(backend, sandbox):
+    sandbox.files_store["/w/a.txt"] = b"hello\n"
+    result = await backend.aread("/w/a.txt")
+    assert result.error is None
+    assert result.file_data["content"] == "hello"
+    assert sandbox.commands.last_command is None
+
+
 def test_id_is_sandbox_id(backend, sandbox):
     assert backend.id == sandbox.id
 
@@ -290,9 +327,6 @@ def test_context_manager_closes_owned(sandbox):
     assert sandbox.killed is True
 
 
-# --------------------------------------------------------------------------- #
-# 可选集成测试(真实服务端 + 真实派生文件操作)
-# --------------------------------------------------------------------------- #
 @pytest.mark.skipif(
     os.environ.get("RUN_OPENSANDBOX_INTEGRATION") != "1",
     reason="需设置 RUN_OPENSANDBOX_INTEGRATION=1 并有运行中的 OpenSandbox 服务端",

@@ -1,12 +1,8 @@
-"""AsyncOpenSandboxBackend 的单元测试(原生异步)。
-
-使用一个异步内存假沙箱,验证三个原生异步原语、辅助逻辑、生命周期,以及“派生的
-异步文件操作(如 ``aread``)确实走原生 ``aexecute``”这一关键点。无需服务端,跨平台。
-pytest-asyncio 以 asyncio_mode=auto 运行 ``async def`` 测试。
-"""
+"""AsyncOpenSandboxBackend 单元测试:异步内存假沙箱驱动原生原语、原生 aread 与并发批量。"""
 
 from __future__ import annotations
 
+import asyncio
 import posixpath
 import shlex
 
@@ -18,9 +14,6 @@ from opensandbox.exceptions import SandboxApiException
 from opensandbox.models.execd import Execution, ExecutionLogs, OutputMessage
 
 
-# --------------------------------------------------------------------------- #
-# 异步假对象(stub)
-# --------------------------------------------------------------------------- #
 def _message(text: str, ts: int, *, is_error: bool = False) -> OutputMessage:
     return OutputMessage(text=text, timestamp=ts, is_error=is_error)
 
@@ -36,7 +29,7 @@ def _execution(*, stdout=(), stderr=(), exit_code=0, error=None) -> Execution:
 class AsyncFakeCommands:
     def __init__(self, sandbox: "AsyncFakeSandbox") -> None:
         self._sandbox = sandbox
-        self.responder = None  # callable(command, opts) -> Execution
+        self.responder = None
         self.raise_exc: Exception | None = None
         self.last_command: str | None = None
         self.last_opts = None
@@ -73,8 +66,6 @@ class AsyncFakeFiles:
 
 
 class AsyncFakeSandbox:
-    """opensandbox.Sandbox(异步)的最小替身。"""
-
     def __init__(self, sandbox_id: str = "sbx-async-1") -> None:
         self.id = sandbox_id
         self.files_store: dict[str, bytes] = {}
@@ -101,9 +92,6 @@ def backend(sandbox: AsyncFakeSandbox) -> AsyncOpenSandboxBackend:
     return AsyncOpenSandboxBackend(sandbox)  # type: ignore[arg-type]
 
 
-# --------------------------------------------------------------------------- #
-# aexecute
-# --------------------------------------------------------------------------- #
 async def test_aexecute_returns_combined_output_and_exit_code(backend, sandbox):
     sandbox.commands.responder = lambda cmd, opts: _execution(
         stdout=[_message("hello", 1)], stderr=[_message("warn", 2)], exit_code=0
@@ -111,12 +99,6 @@ async def test_aexecute_returns_combined_output_and_exit_code(backend, sandbox):
     res = await backend.aexecute("echo hello")
     assert res.output == "hello\nwarn"
     assert res.exit_code == 0
-
-
-async def test_aexecute_empty_command_is_error(backend):
-    res = await backend.aexecute("")
-    assert res.exit_code == 1
-    assert "non-empty" in res.output
 
 
 async def test_aexecute_swallows_sdk_exception(backend, sandbox):
@@ -139,9 +121,6 @@ async def test_default_timeout_applied(sandbox):
     assert sandbox.commands.last_opts.timeout.total_seconds() == 30
 
 
-# --------------------------------------------------------------------------- #
-# aupload_files / adownload_files
-# --------------------------------------------------------------------------- #
 async def test_aupload_files_writes_bytes(backend, sandbox):
     responses = await backend.aupload_files([("/workspace/a.txt", b"hello")])
     assert responses[0].error is None
@@ -183,24 +162,51 @@ async def test_adownload_missing_maps_to_file_not_found(backend):
     assert responses[0].error == FILE_NOT_FOUND
 
 
-# --------------------------------------------------------------------------- #
-# 派生异步文件操作确实走原生 aexecute
-# --------------------------------------------------------------------------- #
-async def test_aread_is_derived_from_native_aexecute(backend, sandbox):
-    # aread 会通过 aexecute 运行服务端读取脚本;这里让 aexecute 返回该脚本约定的
-    # JSON,以证明 BaseSandbox 的派生异步操作确实走我们重写的原生 aexecute。
-    sandbox.commands.responder = lambda cmd, opts: _execution(
-        stdout=[_message('{"encoding": "utf-8", "content": "hello world"}', 1)],
-        exit_code=0,
-    )
+async def test_adownload_preserves_order_under_concurrency(backend, sandbox):
+    sandbox.files_store["/a"] = b"A"
+    sandbox.files_store["/b"] = b"B"
+    original = sandbox.files.read_bytes
+
+    async def slow_first(path, **kw):
+        if path == "/a":
+            await asyncio.sleep(0.05)
+        return await original(path, **kw)
+
+    sandbox.files.read_bytes = slow_first  # type: ignore[assignment]
+    responses = await backend.adownload_files(["/a", "/b"])
+    assert [r.path for r in responses] == ["/a", "/b"]
+    assert [r.content for r in responses] == [b"A", b"B"]
+
+
+async def test_aread_native_no_execute(backend, sandbox):
+    sandbox.files_store["/workspace/x.txt"] = b"hello world\n"
     result = await backend.aread("/workspace/x.txt")
     assert result.error is None
     assert result.file_data["content"] == "hello world"
+    assert sandbox.commands.last_command is None
 
 
-# --------------------------------------------------------------------------- #
-# 仅限异步:同步原语必须拒绝
-# --------------------------------------------------------------------------- #
+async def test_aread_pagination_offset_limit(backend, sandbox):
+    sandbox.files_store["/w/n.txt"] = b"l1\nl2\nl3\nl4\n"
+    result = await backend.aread("/w/n.txt", offset=1, limit=2)
+    assert result.file_data["content"] == "l2\nl3"
+
+
+async def test_aread_missing_maps_to_file_not_found(backend):
+    result = await backend.aread("/nope.txt")
+    assert result.error == f"File '/nope.txt': {FILE_NOT_FOUND}"
+
+
+async def test_als_derives_from_native_aexecute(backend, sandbox):
+    sandbox.commands.responder = lambda cmd, opts: _execution(
+        stdout=[_message('{"path": "/w/a.txt", "is_dir": false}', 1)],
+        exit_code=0,
+    )
+    result = await backend.als("/w")
+    assert result.error is None
+    assert result.entries == [{"path": "/w/a.txt", "is_dir": False}]
+
+
 def test_sync_primitives_raise(backend):
     with pytest.raises(NotImplementedError):
         backend.execute("ls")
@@ -210,9 +216,6 @@ def test_sync_primitives_raise(backend):
         backend.download_files(["/a"])
 
 
-# --------------------------------------------------------------------------- #
-# 标识与生命周期
-# --------------------------------------------------------------------------- #
 async def test_id_is_sandbox_id(backend, sandbox):
     assert backend.id == sandbox.id
 

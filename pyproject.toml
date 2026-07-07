@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "deepagents-opensandbox"
-version = "0.1.0"
+version = "0.2.0"
 description = "A deepagents backend that runs an agent's filesystem and shell inside an Alibaba OpenSandbox sandbox."
 readme = "README.md"
 requires-python = ">=3.11"
