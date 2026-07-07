@@ -73,7 +73,7 @@ DEFAULT_IMAGE = "python:3.11"
 
 # ``create`` 创建的沙箱的默认远端存活时长。到期后若未续期则自动终止,
 # 从而避免后端泄漏导致容器长期不回收。
-DEFAULT_SANDBOX_TIMEOUT = timedelta(minutes=30)
+DEFAULT_LIFETIME = timedelta(minutes=30)
 
 
 class OpenSandboxBackend(BaseSandbox):
@@ -122,7 +122,7 @@ class OpenSandboxBackend(BaseSandbox):
         image: SandboxImageSpec | str = DEFAULT_IMAGE,
         *,
         connection_config: ConnectionConfigSync | None = None,
-        timeout: timedelta | None = DEFAULT_SANDBOX_TIMEOUT,
+        timeout: timedelta | None = DEFAULT_LIFETIME,
         default_timeout: int | None = None,
         **create_kwargs: object,
     ) -> OpenSandboxBackend:
@@ -219,7 +219,7 @@ class OpenSandboxBackend(BaseSandbox):
 
         return ExecuteResponse(
             output=_combine_output(execution),
-            exit_code=_resolve_exit_code(execution),
+            exit_code=_exit_code(execution),
             truncated=False,
         )
 
@@ -319,7 +319,7 @@ def _combine_output(execution: Execution) -> str:
     return "\n".join(msg.text.rstrip("\n") for msg in messages)
 
 
-def _resolve_exit_code(execution: Execution) -> int:
+def _exit_code(execution: Execution) -> int:
     """返回确定的退出码;服务端缺省时进行推断。
 
     某些运行时对流式前台命令不回传 ``exit_code``。若把未知码默认为 ``0``,会让

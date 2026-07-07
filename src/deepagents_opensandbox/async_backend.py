@@ -52,10 +52,10 @@ from opensandbox.models.execd import RunCommandOpts
 
 from deepagents_opensandbox.backend import (
     DEFAULT_IMAGE,
-    DEFAULT_SANDBOX_TIMEOUT,
+    DEFAULT_LIFETIME,
     _classify_error,
     _combine_output,
-    _resolve_exit_code,
+    _exit_code,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - 仅用于类型标注的导入
@@ -103,7 +103,7 @@ class AsyncOpenSandboxBackend(BaseSandbox):
         image: SandboxImageSpec | str = DEFAULT_IMAGE,
         *,
         connection_config: ConnectionConfig | None = None,
-        timeout: timedelta | None = DEFAULT_SANDBOX_TIMEOUT,
+        timeout: timedelta | None = DEFAULT_LIFETIME,
         default_timeout: int | None = None,
         **create_kwargs: object,
     ) -> AsyncOpenSandboxBackend:
@@ -178,7 +178,7 @@ class AsyncOpenSandboxBackend(BaseSandbox):
 
         return ExecuteResponse(
             output=_combine_output(execution),
-            exit_code=_resolve_exit_code(execution),
+            exit_code=_exit_code(execution),
             truncated=False,
         )
 

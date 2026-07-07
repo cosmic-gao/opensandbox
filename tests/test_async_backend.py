@@ -21,7 +21,7 @@ from opensandbox.models.execd import Execution, ExecutionLogs, OutputMessage
 # --------------------------------------------------------------------------- #
 # 异步假对象(stub)
 # --------------------------------------------------------------------------- #
-def _msg(text: str, ts: int, *, is_error: bool = False) -> OutputMessage:
+def _message(text: str, ts: int, *, is_error: bool = False) -> OutputMessage:
     return OutputMessage(text=text, timestamp=ts, is_error=is_error)
 
 
@@ -52,7 +52,7 @@ class AsyncFakeCommands:
             return _execution(exit_code=0)
         if self.responder is not None:
             return self.responder(command, opts)
-        return _execution(stdout=[_msg("ok", 1)], exit_code=0)
+        return _execution(stdout=[_message("ok", 1)], exit_code=0)
 
 
 class AsyncFakeFiles:
@@ -106,7 +106,7 @@ def backend(sandbox: AsyncFakeSandbox) -> AsyncOpenSandboxBackend:
 # --------------------------------------------------------------------------- #
 async def test_aexecute_returns_combined_output_and_exit_code(backend, sandbox):
     sandbox.commands.responder = lambda cmd, opts: _execution(
-        stdout=[_msg("hello", 1)], stderr=[_msg("warn", 2)], exit_code=0
+        stdout=[_message("hello", 1)], stderr=[_message("warn", 2)], exit_code=0
     )
     res = await backend.aexecute("echo hello")
     assert res.output == "hello\nwarn"
@@ -190,7 +190,7 @@ async def test_aread_is_derived_from_native_aexecute(backend, sandbox):
     # aread 会通过 aexecute 运行服务端读取脚本;这里让 aexecute 返回该脚本约定的
     # JSON,以证明 BaseSandbox 的派生异步操作确实走我们重写的原生 aexecute。
     sandbox.commands.responder = lambda cmd, opts: _execution(
-        stdout=[_msg('{"encoding": "utf-8", "content": "hello world"}', 1)],
+        stdout=[_message('{"encoding": "utf-8", "content": "hello world"}', 1)],
         exit_code=0,
     )
     result = await backend.aread("/workspace/x.txt")

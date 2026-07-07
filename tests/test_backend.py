@@ -22,7 +22,7 @@ from deepagents_opensandbox import OpenSandboxBackend
 from deepagents_opensandbox.backend import (
     _classify_error,
     _combine_output,
-    _resolve_exit_code,
+    _exit_code,
 )
 from opensandbox.exceptions import SandboxApiException, SandboxException
 from opensandbox.models.execd import Execution, ExecutionError, ExecutionLogs, OutputMessage
@@ -31,7 +31,7 @@ from opensandbox.models.execd import Execution, ExecutionError, ExecutionLogs, O
 # --------------------------------------------------------------------------- #
 # 假对象(stub)
 # --------------------------------------------------------------------------- #
-def _msg(text: str, ts: int, *, is_error: bool = False) -> OutputMessage:
+def _message(text: str, ts: int, *, is_error: bool = False) -> OutputMessage:
     return OutputMessage(text=text, timestamp=ts, is_error=is_error)
 
 
@@ -65,7 +65,7 @@ class FakeCommands:
             return _execution(exit_code=0)
         if self.responder is not None:
             return self.responder(command, opts)
-        return _execution(stdout=[_msg("ok", 1)], exit_code=0)
+        return _execution(stdout=[_message("ok", 1)], exit_code=0)
 
 
 class FakeFiles:
@@ -121,8 +121,8 @@ def backend(sandbox: FakeSandbox) -> OpenSandboxBackend:
 # --------------------------------------------------------------------------- #
 def test_combine_output_orders_by_timestamp():
     execution = _execution(
-        stdout=[_msg("first", 1), _msg("third", 3)],
-        stderr=[_msg("second", 2, is_error=True)],
+        stdout=[_message("first", 1), _message("third", 3)],
+        stderr=[_message("second", 2, is_error=True)],
     )
     assert _combine_output(execution) == "first\nsecond\nthird"
 
@@ -134,21 +134,21 @@ def test_combine_output_empty_is_empty_string():
 
 
 def test_combine_output_strips_trailing_newlines_per_message():
-    execution = _execution(stdout=[_msg("line\n", 1), _msg("next\n", 2)])
+    execution = _execution(stdout=[_message("line\n", 1), _message("next\n", 2)])
     assert _combine_output(execution) == "line\nnext"
 
 
-def test_resolve_exit_code_prefers_explicit():
-    assert _resolve_exit_code(_execution(exit_code=7)) == 7
+def test_exit_code_prefers_explicit():
+    assert _exit_code(_execution(exit_code=7)) == 7
 
 
-def test_resolve_exit_code_infers_success_when_missing():
-    assert _resolve_exit_code(_execution(exit_code=None)) == 0
+def test_exit_code_infers_success_when_missing():
+    assert _exit_code(_execution(exit_code=None)) == 0
 
 
-def test_resolve_exit_code_infers_failure_from_error():
+def test_exit_code_infers_failure_from_error():
     err = ExecutionError(name="RuntimeError", value="boom", timestamp=1)
-    assert _resolve_exit_code(_execution(exit_code=None, error=err)) == 1
+    assert _exit_code(_execution(exit_code=None, error=err)) == 1
 
 
 @pytest.mark.parametrize(
@@ -170,7 +170,7 @@ def test_classify_error(exc, expected):
 # --------------------------------------------------------------------------- #
 def test_execute_returns_combined_output_and_exit_code(backend, sandbox):
     sandbox.commands.responder = lambda cmd, opts: _execution(
-        stdout=[_msg("hello", 1)], stderr=[_msg("warn", 2)], exit_code=0
+        stdout=[_message("hello", 1)], stderr=[_message("warn", 2)], exit_code=0
     )
     res = backend.execute("echo hello")
     assert res.output == "hello\nwarn"
