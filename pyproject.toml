@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "deepagents-opensandbox"
+version = "0.1.0"
+description = "A deepagents backend that runs an agent's filesystem and shell inside an Alibaba OpenSandbox sandbox."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "August Gao" }]
+keywords = ["deepagents", "opensandbox", "agent", "sandbox", "langchain", "llm"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "deepagents>=0.6.12",
+    "opensandbox>=0.1.13",
+]
+
+[project.optional-dependencies]
+# Extras for running the LLM-driven example (any langchain chat model works).
+examples = ["langchain-openai"]
+dev = ["pytest>=9", "pytest-asyncio>=1.4"]
+
+[project.urls]
+"OpenSandbox" = "https://github.com/alibaba/OpenSandbox"
+"deepagents" = "https://github.com/langchain-ai/deepagents"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deepagents_opensandbox"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
