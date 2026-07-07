@@ -1,35 +1,8 @@
-"""面向高并发的**原生异步** deepagents 后端。
+"""OpenSandbox 支撑的**原生异步** deepagents 后端,用于高并发 / 评测 / RL。
 
-:class:`AsyncOpenSandboxBackend` 封装 OpenSandbox 的**异步** SDK
-(``opensandbox.Sandbox``,基于异步 httpx),原生实现三个异步原语
-``aexecute``/``aupload_files``/``adownload_files``。由于 ``BaseSandbox`` 的异步文件
-操作(``als``/``aread``/``awrite``/``aedit``/``aglob``/``agrep``)内部都调用
-``self.aexecute``/``self.aupload_files``,因此**整个异步接口都会走原生协程**,
-无需 ``asyncio.to_thread`` 线程卸载。
-
-为何要它
---------
-:class:`~deepagents_opensandbox.backend.OpenSandboxBackend`(同步)配异步智能体时,
-deepagents 会通过 ``asyncio.to_thread`` 把阻塞调用丢进线程池——单智能体够用,但在
-**高并发 / 批量评测 / RL rollout** 下,并发受线程池上限约束、长时 SSE 流会占满线程、
-超时也无法真正中断阻塞的 socket 读。原生异步用协程承载在途 I/O,可轻松扩展到数千
-并发,并支持干净的取消与超时。
-
-仅限异步
---------
-本后端只服务异步智能体(``agent.ainvoke(...)``)。同步原语
-``execute``/``upload_files``/``download_files`` 会抛出 ``NotImplementedError``——
-同步场景请改用 :class:`~deepagents_opensandbox.backend.OpenSandboxBackend`。
-
-Example:
-    ```python
-    from deepagents import create_deep_agent
-    from deepagents_opensandbox import AsyncOpenSandboxBackend
-
-    async with await AsyncOpenSandboxBackend.create(image="python:3.11") as backend:
-        agent = create_deep_agent(model="openai:gpt-5.5", backend=backend)
-        result = await agent.ainvoke({"messages": [{"role": "user", "content": "..."}]})
-    ```
+封装异步 ``opensandbox.Sandbox``,原生实现 aexecute/aupload_files/adownload_files;
+BaseSandbox 的异步文件操作都转发到这三者,故整个异步接口都是原生协程(不走线程池)。
+仅供异步智能体(``agent.ainvoke``)——同步原语会抛 ``NotImplementedError``。详见 README。
 """
 
 from __future__ import annotations
@@ -58,7 +31,7 @@ from deepagents_opensandbox.backend import (
     _exit_code,
 )
 
-if TYPE_CHECKING:  # pragma: no cover - 仅用于类型标注的导入
+if TYPE_CHECKING:  # pragma: no cover
     from opensandbox.config import ConnectionConfig
     from opensandbox.models.sandboxes import SandboxImageSpec
 
@@ -66,7 +39,6 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["AsyncOpenSandboxBackend"]
 
-# 同步原语被调用时给出的提示(功能性字符串,保持英文)。
 _SYNC_UNSUPPORTED = (
     "AsyncOpenSandboxBackend is async-only; use it with async agents "
     "(agent.ainvoke(...)). For synchronous agents use OpenSandboxBackend."
@@ -77,11 +49,11 @@ class AsyncOpenSandboxBackend(BaseSandbox):
     """由 OpenSandbox 异步沙箱支撑的原生异步 deepagents 后端。
 
     Args:
-        sandbox: 一个就绪的异步 ``Sandbox`` 实例。
-        owns_sandbox: 若为 ``True``,:meth:`aclose` 会 ``kill()`` 远端沙箱并释放
-            本地资源;由 :meth:`create` 自动置为 ``True``。
-        default_timeout: 调用 ``aexecute`` 未显式指定 ``timeout`` 时使用的默认
-            单命令超时(秒)。``None`` 表示客户端不施加超时。
+        sandbox: 就绪的异步 ``Sandbox`` 实例。
+        owns_sandbox: 为 ``True`` 时 :meth:`aclose` 会终止远端沙箱;:meth:`create`
+            会置为 ``True``。
+        default_timeout: ``aexecute`` 未指定 ``timeout`` 时的默认单命令超时(秒);
+            ``None`` 表示不限。
     """
 
     def __init__(
@@ -95,8 +67,6 @@ class AsyncOpenSandboxBackend(BaseSandbox):
         self._owns_sandbox = owns_sandbox
         self._default_timeout = default_timeout
 
-    # -- 构造辅助方法(异步,因为 Sandbox.create/connect 是协程)-------------
-
     @classmethod
     async def create(
         cls,
@@ -107,7 +77,7 @@ class AsyncOpenSandboxBackend(BaseSandbox):
         default_timeout: int | None = None,
         **create_kwargs: object,
     ) -> AsyncOpenSandboxBackend:
-        """新建一个异步 OpenSandbox 沙箱并封装它(后端拥有其生命周期)。"""
+        """新建并拥有一个异步沙箱;额外 kwargs 透传给 ``Sandbox.create``。"""
         sandbox = await Sandbox.create(
             image,
             connection_config=connection_config,
@@ -125,7 +95,7 @@ class AsyncOpenSandboxBackend(BaseSandbox):
         default_timeout: int | None = None,
         **connect_kwargs: object,
     ) -> AsyncOpenSandboxBackend:
-        """按 id 连接到已运行的异步沙箱并封装它(不拥有其生命周期)。"""
+        """连接到已运行的异步沙箱并封装;不拥有它,:meth:`aclose` 不会终止它。"""
         sandbox = await Sandbox.connect(
             sandbox_id,
             connection_config=connection_config,
@@ -133,27 +103,16 @@ class AsyncOpenSandboxBackend(BaseSandbox):
         )
         return cls(sandbox, owns_sandbox=False, default_timeout=default_timeout)
 
-    # -- 自省 ----------------------------------------------------------------
-
     @property
     def sandbox(self) -> Sandbox:
-        """底层的 OpenSandbox 异步 ``Sandbox`` 实例。"""
         return self._sandbox
 
     @property
     def id(self) -> str:
-        """后端的稳定标识(即 OpenSandbox 沙箱 id)。"""
         return self._sandbox.id
 
-    # -- 原生异步原语 --------------------------------------------------------
-
     async def aexecute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
-        """在沙箱内异步执行 ``command``,返回合并输出与退出码。
-
-        这是 ``BaseSandbox`` 派生全部异步文件操作的核心原语。语义与同步后端一致
-        (见 :class:`~deepagents_opensandbox.backend.OpenSandboxBackend`),但全程
-        ``await``,不占用线程池。
-        """
+        """异步执行命令,返回合并输出与退出码;语义同 ``OpenSandboxBackend.execute``,但全程 ``await``。"""
         if not command or not isinstance(command, str):
             return ExecuteResponse(
                 output="Error: Command must be a non-empty string.",
@@ -163,6 +122,7 @@ class AsyncOpenSandboxBackend(BaseSandbox):
 
         effective_timeout = timeout if timeout is not None else self._default_timeout
         opts: RunCommandOpts | None = None
+        # timeout<=0 表示不设客户端超时,交给服务端策略,而非施加 0 秒截止时间。
         if effective_timeout is not None and effective_timeout > 0:
             opts = RunCommandOpts(timeout=timedelta(seconds=effective_timeout))
 
@@ -183,7 +143,7 @@ class AsyncOpenSandboxBackend(BaseSandbox):
         )
 
     async def aupload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
-        """把若干 ``(path, bytes)`` 异步写入沙箱,支持部分成功。"""
+        """异步写入若干 ``(path, bytes)``,支持部分成功;父目录缺失时 ``mkdir -p`` 后重试一次。"""
         return [await self._aupload_one(path, data) for path, data in files]
 
     async def _aupload_one(self, path: str, data: bytes) -> FileUploadResponse:
@@ -213,18 +173,11 @@ class AsyncOpenSandboxBackend(BaseSandbox):
             except Exception as exc:  # noqa: BLE001 - 逐个文件上报,绝不抛出
                 logger.debug("adownload failed for %s", path, exc_info=exc)
                 responses.append(
-                    FileDownloadResponse(
-                        path=path,
-                        content=None,
-                        error=_classify_error(exc) or str(exc),
-                    )
+                    FileDownloadResponse(path=path, content=None, error=_classify_error(exc) or str(exc))
                 )
         return responses
 
-    # -- 同步原语:不支持(本后端仅限异步)----------------------------------
-    # BaseSandbox 把这三个方法声明为抽象方法,必须实现;此处显式拒绝,
-    # 引导用户使用异步接口或改用同步后端。
-
+    # BaseSandbox 要求实现这三个抽象方法;本后端仅限异步,故显式拒绝。
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         raise NotImplementedError(_SYNC_UNSUPPORTED)
 
@@ -234,10 +187,8 @@ class AsyncOpenSandboxBackend(BaseSandbox):
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         raise NotImplementedError(_SYNC_UNSUPPORTED)
 
-    # -- 生命周期 ------------------------------------------------------------
-
     async def aclose(self) -> None:
-        """异步释放资源:拥有沙箱时终止远端并关闭本地传输,否则为空操作。"""
+        """终止并释放资源;仅当拥有沙箱(``owns_sandbox=True``)时生效,否则为空操作。"""
         if not self._owns_sandbox:
             return
         try:
@@ -254,7 +205,4 @@ class AsyncOpenSandboxBackend(BaseSandbox):
         await self.aclose()
 
     def __repr__(self) -> str:
-        return (
-            f"AsyncOpenSandboxBackend(id={self._sandbox.id!r}, "
-            f"owns_sandbox={self._owns_sandbox})"
-        )
+        return f"AsyncOpenSandboxBackend(id={self._sandbox.id!r}, owns_sandbox={self._owns_sandbox})"
